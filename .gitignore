@@ -15,3 +15,5 @@ env/
 .pydevproject
 tests/test_bugfix.py
 htmlcov/
+debian/files
+debian/python-mongoengine*

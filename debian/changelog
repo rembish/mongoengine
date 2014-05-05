@@ -1,0 +1,5 @@
+python-mongoengine (0.8.7) precise; urgency=low
+
+  * Debianization.
+
+ -- Aleksey Rembish <alex@rembish.org>  Mon, 05 May 2014 23:34:18 +0200
