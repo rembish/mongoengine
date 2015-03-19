@@ -163,7 +163,7 @@ class InheritanceTest(unittest.TestCase):
         class Employee(Person):
             salary = IntField()
 
-        self.assertEqual(['age', 'id', 'name', 'salary'],
+        self.assertEqual(['_cls', 'age', 'id', 'name', 'salary'],
                          sorted(Employee._fields.keys()))
         self.assertEqual(Employee._get_collection_name(),
                          Person._get_collection_name())
@@ -180,7 +180,7 @@ class InheritanceTest(unittest.TestCase):
         class Employee(Person):
             salary = IntField()
 
-        self.assertEqual(['age', 'id', 'name', 'salary'],
+        self.assertEqual(['_cls', 'age', 'id', 'name', 'salary'],
                          sorted(Employee._fields.keys()))
         self.assertEqual(Person(name="Bob", age=35).to_mongo().keys(),
                          ['_cls', 'name', 'age'])
@@ -396,6 +396,16 @@ class InheritanceTest(unittest.TestCase):
                 evil = BooleanField(default=True)
                 meta = {'abstract': True}
         self.assertRaises(ValueError, create_bad_abstract)
+
+    def test_abstract_embedded_documents(self):
+        # 789: EmbeddedDocument shouldn't inherit abstract
+        class A(EmbeddedDocument):
+            meta = {"abstract": True}
+
+        class B(A):
+            pass
+
+        self.assertFalse(B._meta["abstract"])
 
     def test_inherited_collections(self):
         """Ensure that subclassed documents don't override parents'

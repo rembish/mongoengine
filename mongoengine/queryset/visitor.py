@@ -1,8 +1,9 @@
 import copy
 
-from mongoengine.errors import InvalidQueryError
-from mongoengine.python_support import product, reduce
+from itertools import product
+from functools import reduce
 
+from mongoengine.errors import InvalidQueryError
 from mongoengine.queryset import transform
 
 __all__ = ('Q',)
@@ -28,7 +29,7 @@ class DuplicateQueryConditionsError(InvalidQueryError):
 
 
 class SimplificationVisitor(QNodeVisitor):
-    """Simplifies query trees by combinging unnecessary 'and' connection nodes
+    """Simplifies query trees by combining unnecessary 'and' connection nodes
     into a single Q-object.
     """
 

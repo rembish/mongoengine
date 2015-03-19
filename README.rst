@@ -11,6 +11,10 @@ MongoEngine
   
 .. image:: https://coveralls.io/repos/MongoEngine/mongoengine/badge.png?branch=master 
   :target: https://coveralls.io/r/MongoEngine/mongoengine?branch=master
+  
+.. image:: https://landscape.io/github/MongoEngine/mongoengine/master/landscape.png
+   :target: https://landscape.io/github/MongoEngine/mongoengine/master
+   :alt: Code Health
 
 About
 =====
@@ -29,8 +33,17 @@ setup.py install``.
 
 Dependencies
 ============
-- pymongo 2.5+
+- pymongo>=2.7.1
 - sphinx (optional - for documentation generation)
+
+Optional Dependencies
+---------------------
+- **Django Integration:** Django>=1.4.0 for Python 2.x or PyPy and Django>=1.5.0 for Python 3.x
+- **Image Fields**: Pillow>=2.0.0 or PIL (not recommended since MongoEngine is tested with Pillow)
+- dateutil>=2.1.0
+
+.. note
+   MongoEngine always runs it's test suite against the latest patch version of each dependecy. e.g.: Django 1.6.5
 
 Examples
 ========

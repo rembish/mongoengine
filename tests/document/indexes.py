@@ -18,7 +18,7 @@ __all__ = ("IndexesTest", )
 class IndexesTest(unittest.TestCase):
 
     def setUp(self):
-        connect(db='mongoenginetest')
+        self.connection = connect(db='mongoenginetest')
         self.db = get_db()
 
         class Person(Document):
@@ -174,6 +174,16 @@ class IndexesTest(unittest.TestCase):
         A.ensure_indexes()
         info = A._get_collection().index_information()
         self.assertEqual(len(info.keys()), 2)
+
+        class B(A):
+            c = StringField()
+            d = StringField()
+            meta = {
+                'indexes': [{'fields': ['c']}, {'fields': ['d'], 'cls': True}],
+                'allow_inheritance': True
+            }
+        self.assertEqual([('c', 1)], B._meta['index_specs'][1]['fields'])
+        self.assertEqual([('_cls', 1), ('d', 1)], B._meta['index_specs'][2]['fields'])
 
     def test_build_index_spec_is_not_destructive(self):
 
@@ -485,9 +495,12 @@ class IndexesTest(unittest.TestCase):
 
         self.assertEqual(BlogPost.objects.hint([('ZZ', 1)]).count(), 10)
 
-        def invalid_index():
-            BlogPost.objects.hint('tags')
-        self.assertRaises(TypeError, invalid_index)
+        if pymongo.version >= '2.8':
+            self.assertEqual(BlogPost.objects.hint('tags').count(), 10)
+        else:
+            def invalid_index():
+                BlogPost.objects.hint('tags')
+            self.assertRaises(TypeError, invalid_index)
 
         def invalid_index_2():
             return BlogPost.objects.hint(('tags', 1))
@@ -564,6 +577,38 @@ class IndexesTest(unittest.TestCase):
         post3 = BlogPost(title='test3',
                          sub=SubDocument(year=2010, slug='test'))
         self.assertRaises(NotUniqueError, post3.save)
+
+        BlogPost.drop_collection()
+
+    def test_unique_embedded_document_in_list(self):
+        """
+        Ensure that the uniqueness constraints are applied to fields in
+        embedded documents, even when the embedded documents in in a
+        list field.
+        """
+        class SubDocument(EmbeddedDocument):
+            year = IntField(db_field='yr')
+            slug = StringField(unique=True)
+
+        class BlogPost(Document):
+            title = StringField()
+            subs = ListField(EmbeddedDocumentField(SubDocument))
+
+        BlogPost.drop_collection()
+
+        post1 = BlogPost(
+            title='test1', subs=[
+                SubDocument(year=2009, slug='conflict'),
+                SubDocument(year=2009, slug='conflict')
+            ]
+        )
+        post1.save()
+
+        post2 = BlogPost(
+            title='test2', subs=[SubDocument(year=2014, slug='conflict')]
+        )
+
+        self.assertRaises(NotUniqueError, post2.save)
 
         BlogPost.drop_collection()
 
@@ -726,6 +771,60 @@ class IndexesTest(unittest.TestCase):
         self.assertEqual({'text': 'OK', '_id': {'term': 'ok', 'name': 'n'}},
                          report.to_mongo())
         self.assertEqual(report, Report.objects.get(pk=my_key))
+
+    def test_string_indexes(self):
+
+        class MyDoc(Document):
+            provider_ids = DictField()
+            meta = {
+                "indexes": ["provider_ids.foo", "provider_ids.bar"],
+            }
+
+        info = MyDoc.objects._collection.index_information()
+        info = [value['key'] for key, value in info.iteritems()]
+        self.assertTrue([('provider_ids.foo', 1)] in info)
+        self.assertTrue([('provider_ids.bar', 1)] in info)
+
+    def test_text_indexes(self):
+
+        class Book(Document):
+            title = DictField()
+            meta = {
+                "indexes": ["$title"],
+            }
+
+        indexes = Book.objects._collection.index_information()
+        self.assertTrue("title_text" in indexes)
+        key = indexes["title_text"]["key"]
+        self.assertTrue(('_fts', 'text') in key)
+
+    def test_indexes_after_database_drop(self):
+        """
+        Test to ensure that indexes are re-created on a collection even
+        after the database has been dropped.
+
+        Issue #812
+        """
+        class BlogPost(Document):
+            title = StringField()
+            slug = StringField(unique=True)
+
+        BlogPost.drop_collection()
+
+        # Create Post #1
+        post1 = BlogPost(title='test1', slug='test')
+        post1.save()
+
+        # Drop the Database
+        self.connection.drop_database(BlogPost._get_db().name)
+
+        # Re-create Post #1
+        post1 = BlogPost(title='test1', slug='test')
+        post1.save()
+
+        # Create Post #2
+        post2 = BlogPost(title='test2', slug='test')
+        self.assertRaises(NotUniqueError, post2.save)
 
 if __name__ == '__main__':
     unittest.main()

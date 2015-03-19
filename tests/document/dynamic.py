@@ -81,6 +81,13 @@ class DynamicTest(unittest.TestCase):
         obj = collection.find_one()
         self.assertEqual(sorted(obj.keys()), ['_cls', '_id', 'name'])
 
+    def test_reload_after_unsetting(self):
+        p = self.Person()
+        p.misc = 22
+        p.save()
+        p.update(unset__misc=1)
+        p.reload()
+
     def test_dynamic_document_queries(self):
         """Ensure we can query dynamic fields"""
         p = self.Person()
@@ -292,6 +299,59 @@ class DynamicTest(unittest.TestCase):
         person.save()
         self.assertEqual(Person.objects.first().age, 35)
 
+    def test_dynamic_embedded_works_with_only(self):
+        """Ensure custom fieldnames on a dynamic embedded document are found by qs.only()"""
+
+        class Address(DynamicEmbeddedDocument):
+            city = StringField()
+
+        class Person(DynamicDocument):
+            address = EmbeddedDocumentField(Address)
+
+        Person.drop_collection()
+
+        Person(name="Eric", address=Address(city="San Francisco", street_number="1337")).save()
+
+        self.assertEqual(Person.objects.first().address.street_number, '1337')
+        self.assertEqual(Person.objects.only('address__street_number').first().address.street_number, '1337')
+
+    def test_dynamic_and_embedded_dict_access(self):
+        """Ensure embedded dynamic documents work with dict[] style access"""
+
+        class Address(EmbeddedDocument):
+            city = StringField()
+
+        class Person(DynamicDocument):
+            name = StringField()
+
+        Person.drop_collection()
+
+        Person(name="Ross", address=Address(city="London")).save()
+
+        person = Person.objects.first()
+        person.attrval = "This works"
+
+        person["phone"] = "555-1212" # but this should too
+
+        # Same thing two levels deep
+        person["address"]["city"] = "Lundenne"
+        person.save()
+
+        self.assertEqual(Person.objects.first().address.city, "Lundenne")
+
+        self.assertEqual(Person.objects.first().phone, "555-1212")
+
+        person = Person.objects.first()
+        person.address = Address(city="Londinium")
+        person.save()
+
+        self.assertEqual(Person.objects.first().address.city, "Londinium")
+
+
+        person = Person.objects.first()
+        person["age"] = 35
+        person.save()
+        self.assertEqual(Person.objects.first().age, 35)
 
 if __name__ == '__main__':
     unittest.main()

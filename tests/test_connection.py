@@ -1,6 +1,11 @@
 import sys
 sys.path[0:0] = [""]
-import unittest
+
+try:
+    import unittest2 as unittest
+except ImportError:
+    import unittest
+
 import datetime
 
 import pymongo
@@ -33,6 +38,17 @@ class ConnectionTest(unittest.TestCase):
         connect('mongoenginetest2', alias='testdb')
         conn = get_connection('testdb')
         self.assertTrue(isinstance(conn, pymongo.mongo_client.MongoClient))
+
+    def test_sharing_connections(self):
+        """Ensure that connections are shared when the connection settings are exactly the same
+        """
+        connect('mongoenginetest', alias='testdb1')
+
+        expected_connection = get_connection('testdb1')
+
+        connect('mongoenginetest', alias='testdb2')
+        actual_connection = get_connection('testdb2')
+        self.assertEqual(expected_connection, actual_connection)
 
     def test_connect_uri(self):
         """Ensure that the connect() method works properly with uri's
@@ -130,6 +146,18 @@ class ConnectionTest(unittest.TestCase):
 
         date_doc = DateDoc.objects.first()
         self.assertEqual(d, date_doc.the_date)
+
+    def test_multiple_connection_settings(self):
+        connect('mongoenginetest', alias='t1', host="localhost")
+
+        connect('mongoenginetest2', alias='t2', host="127.0.0.1")
+
+        mongo_connections = mongoengine.connection._connections
+        self.assertEqual(len(mongo_connections.items()), 2)
+        self.assertTrue('t1' in mongo_connections.keys())
+        self.assertTrue('t2' in mongo_connections.keys())
+        self.assertEqual(mongo_connections['t1'].host, 'localhost')
+        self.assertEqual(mongo_connections['t2'].host, '127.0.0.1')
 
 
 if __name__ == '__main__':

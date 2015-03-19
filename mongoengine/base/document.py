@@ -12,12 +12,17 @@ from bson.son import SON
 from mongoengine import signals
 from mongoengine.common import _import_class
 from mongoengine.errors import (ValidationError, InvalidDocumentError,
-                                LookUpError)
-from mongoengine.python_support import (PY3, UNICODE_KWARGS, txt_type,
-                                        to_str_keys_recursive)
+                                LookUpError, FieldDoesNotExist)
+from mongoengine.python_support import PY3, txt_type
 
 from mongoengine.base.common import get_document, ALLOW_INHERITANCE
-from mongoengine.base.datastructures import BaseDict, BaseList
+from mongoengine.base.datastructures import (
+    BaseDict,
+    BaseList,
+    EmbeddedDocumentList,
+    StrictDict,
+    SemiStrictDict
+)
 from mongoengine.base.fields import ComplexBaseField
 
 __all__ = ('BaseDocument', 'NON_FIELD_ERRORS')
@@ -26,11 +31,12 @@ NON_FIELD_ERRORS = '__all__'
 
 
 class BaseDocument(object):
+    __slots__ = ('_changed_fields', '_initialised', '_created', '_data',
+                 '_dynamic_fields', '_auto_id_field', '_db_field_map', '__weakref__')
 
     _dynamic = False
-    _created = True
     _dynamic_lock = True
-    _initialised = False
+    STRICT = False
 
     def __init__(self, *args, **values):
         """
@@ -39,6 +45,8 @@ class BaseDocument(object):
         :param __auto_convert: Try and will cast python objects to Object types
         :param values: A dictionary of values for the document
         """
+        self._initialised = False
+        self._created = True
         if args:
             # Combine positional arguments with named arguments.
             # We only want named arguments.
@@ -49,20 +57,47 @@ class BaseDocument(object):
             for value in args:
                 name = next(field)
                 if name in values:
-                    raise TypeError("Multiple values for keyword argument '" + name + "'")
+                    raise TypeError(
+                        "Multiple values for keyword argument '" + name + "'")
                 values[name] = value
+
         __auto_convert = values.pop("__auto_convert", True)
+
+        # 399: set default values only to fields loaded from DB
+        __only_fields = set(values.pop("__only_fields", values))
+
+        _created = values.pop("_created", True)
+
         signals.pre_init.send(self.__class__, document=self, values=values)
+
+        # Check if there are undefined fields supplied, if so raise an
+        # Exception.
+        if not self._dynamic:
+            for var in values.keys():
+                if var not in self._fields.keys() + ['id', 'pk', '_cls', '_text_score']:
+                    msg = (
+                        "The field '{0}' does not exist on the document '{1}'"
+                    ).format(var, self._class_name)
+                    raise FieldDoesNotExist(msg)
+
+        if self.STRICT and not self._dynamic:
+            self._data = StrictDict.create(allowed_keys=self._fields_ordered)()
+        else:
+            self._data = SemiStrictDict.create(
+                allowed_keys=self._fields_ordered)()
 
         self._data = {}
         self._dynamic_fields = SON()
 
         # Assign default values to instance
         for key, field in self._fields.iteritems():
-            if self._db_field_map.get(key, key) in values:
+            if self._db_field_map.get(key, key) in __only_fields:
                 continue
             value = getattr(self, key, None)
             setattr(self, key, value)
+
+        if "_cls" not in values:
+            self._cls = self._class_name
 
         # Set passed values after initialisation
         if self._dynamic:
@@ -97,6 +132,7 @@ class BaseDocument(object):
 
         # Flag initialised
         self._initialised = True
+        self._created = _created
         signals.post_init.send(self.__class__, document=self)
 
     def __delattr__(self, *args, **kwargs):
@@ -130,18 +166,26 @@ class BaseDocument(object):
                 self._data[name] = value
                 if hasattr(self, '_changed_fields'):
                     self._mark_as_changed(name)
+        try:
+            self__created = self._created
+        except AttributeError:
+            self__created = True
 
-        if (self._is_document and not self._created and
-           name in self._meta.get('shard_key', tuple()) and
-           self._data.get(name) != value):
+        if (self._is_document and not self__created and
+                name in self._meta.get('shard_key', tuple()) and
+                self._data.get(name) != value):
             OperationError = _import_class('OperationError')
             msg = "Shard Keys are immutable. Tried to update %s" % name
             raise OperationError(msg)
 
+        try:
+            self__initialised = self._initialised
+        except AttributeError:
+            self__initialised = False
         # Check if the user has created a new instance of a class
-        if (self._is_document and self._initialised
-           and self._created and name == self._meta['id_field']):
-                super(BaseDocument, self).__setattr__('_created', False)
+        if (self._is_document and self__initialised
+                and self__created and name == self._meta['id_field']):
+            super(BaseDocument, self).__setattr__('_created', False)
 
         super(BaseDocument, self).__setattr__(name, value)
 
@@ -158,9 +202,11 @@ class BaseDocument(object):
         if isinstance(data["_data"], SON):
             data["_data"] = self.__class__._from_son(data["_data"])._data
         for k in ('_changed_fields', '_initialised', '_created', '_data',
-                  '_fields_ordered', '_dynamic_fields'):
+                  '_dynamic_fields'):
             if k in data:
                 setattr(self, k, data[k])
+        if '_fields_ordered' in data:
+            setattr(type(self), '_fields_ordered', data['_fields_ordered'])
         dynamic_fields = data.get('_dynamic_fields') or SON()
         for k in dynamic_fields.keys():
             setattr(self, k, data["_data"].get(k))
@@ -182,7 +228,7 @@ class BaseDocument(object):
         """Dictionary-style field access, set a field's value.
         """
         # Ensure that the field exists before settings its value
-        if name not in self._fields:
+        if not self._dynamic and name not in self._fields:
             raise KeyError(name)
         return setattr(self, name, value)
 
@@ -201,7 +247,7 @@ class BaseDocument(object):
             u = self.__str__()
         except (UnicodeEncodeError, UnicodeDecodeError):
             u = '[Bad Unicode data]'
-        repr_type = type(u)
+        repr_type = str if u is None else type(u)
         return repr_type('<%s: %s>' % (self.__class__.__name__, u))
 
     def __str__(self):
@@ -213,9 +259,12 @@ class BaseDocument(object):
         return txt_type('%s object' % self.__class__.__name__)
 
     def __eq__(self, other):
-        if isinstance(other, self.__class__) and hasattr(other, 'id'):
-            if self.id == other.id:
-                return True
+        if isinstance(other, self.__class__) and hasattr(other, 'id') and other.id is not None:
+            return self.id == other.id
+        if isinstance(other, DBRef):
+            return self._get_collection_name() == other.collection and self.id == other.id
+        if self.id is None:
+            return self is other
         return False
 
     def __ne__(self, other):
@@ -238,21 +287,56 @@ class BaseDocument(object):
         """
         pass
 
-    def to_mongo(self):
-        """Return as SON data ready for use with MongoDB.
+    def get_text_score(self):
         """
+        Get text score from text query
+        """
+
+        if '_text_score' not in self._data:
+            raise InvalidDocumentError('This document is not originally built from a text query')
+
+        return self._data['_text_score']
+
+    def to_mongo(self, use_db_field=True, fields=None):
+        """
+        Return as SON data ready for use with MongoDB.
+        """
+        if not fields:
+            fields = []
+        
         data = SON()
         data["_id"] = None
         data['_cls'] = self._class_name
+        EmbeddedDocumentField = _import_class("EmbeddedDocumentField")
+        # only root fields ['test1.a', 'test2'] => ['test1', 'test2']
+        root_fields = set([f.split('.')[0] for f in fields])
 
         for field_name in self:
+            if root_fields and field_name not in root_fields:
+                continue
+
             value = self._data.get(field_name, None)
             field = self._fields.get(field_name)
+
             if field is None and self._dynamic:
                 field = self._dynamic_fields.get(field_name)
 
             if value is not None:
-                value = field.to_mongo(value)
+
+                if isinstance(field, (EmbeddedDocumentField)):
+                    if fields:
+                        key = '%s.' % field_name
+                        embedded_fields = [
+                            i.replace(key, '') for i in fields
+                            if i.startswith(key)]
+
+                    else:
+                        embedded_fields = []
+
+                    value = field.to_mongo(value, use_db_field=use_db_field,
+                                           fields=embedded_fields)
+                else:
+                    value = field.to_mongo(value)
 
             # Handle self generating fields
             if value is None and field._auto_gen:
@@ -260,7 +344,10 @@ class BaseDocument(object):
                 self._data[field_name] = value
 
             if value is not None:
-                data[field.db_field] = value
+                if use_db_field:
+                    data[field.db_field] = value
+                else:
+                    data[field.name] = value
 
         # If "_id" has not been set, then try and set it
         Document = _import_class("Document")
@@ -273,7 +360,7 @@ class BaseDocument(object):
 
         # Only add _cls if allow_inheritance is True
         if (not hasattr(self, '_meta') or
-           not self._meta.get('allow_inheritance', ALLOW_INHERITANCE)):
+                not self._meta.get('allow_inheritance', ALLOW_INHERITANCE)):
             data.pop('_cls')
 
         return data
@@ -295,7 +382,8 @@ class BaseDocument(object):
                    self._data.get(name)) for name in self._fields_ordered]
 
         EmbeddedDocumentField = _import_class("EmbeddedDocumentField")
-        GenericEmbeddedDocumentField = _import_class("GenericEmbeddedDocumentField")
+        GenericEmbeddedDocumentField = _import_class(
+            "GenericEmbeddedDocumentField")
 
         for field, value in fields:
             if value is not None:
@@ -317,24 +405,29 @@ class BaseDocument(object):
             pk = "None"
             if hasattr(self, 'pk'):
                 pk = self.pk
-            elif self._instance:
+            elif self._instance and hasattr(self._instance, 'pk'):
                 pk = self._instance.pk
             message = "ValidationError (%s:%s) " % (self._class_name, pk)
             raise ValidationError(message, errors=errors)
 
     def to_json(self, *args, **kwargs):
-        """Converts a document to JSON"""
-        return json_util.dumps(self.to_mongo(),  *args, **kwargs)
+        """Converts a document to JSON.
+        :param use_db_field: Set to True by default but enables the output of the json structure with the field names and not the mongodb store db_names in case of set to False
+        """
+        use_db_field = kwargs.pop('use_db_field', True)
+        return json_util.dumps(self.to_mongo(use_db_field),  *args, **kwargs)
 
     @classmethod
-    def from_json(cls, json_data):
+    def from_json(cls, json_data, created=False):
         """Converts json data to an unsaved document instance"""
-        return cls._from_son(json_util.loads(json_data))
+        return cls._from_son(json_util.loads(json_data), created=created)
 
     def __expand_dynamic_values(self, name, value):
         """expand any dynamic values to their correct types / values"""
         if not isinstance(value, (dict, list, tuple)):
             return value
+
+        EmbeddedDocumentListField = _import_class('EmbeddedDocumentListField')
 
         is_list = False
         if not hasattr(value, 'items'):
@@ -358,8 +451,11 @@ class BaseDocument(object):
 
         # Convert lists / values so we can watch for any changes on them
         if (isinstance(value, (list, tuple)) and
-           not isinstance(value, BaseList)):
-            value = BaseList(value, self, name)
+                not isinstance(value, BaseList)):
+            if issubclass(type(self), EmbeddedDocumentListField):
+                value = EmbeddedDocumentList(value, self, name)
+            else:
+                value = BaseList(value, self, name)
         elif isinstance(value, dict) and not isinstance(value, BaseDict):
             value = BaseDict(value, self, name)
 
@@ -370,9 +466,18 @@ class BaseDocument(object):
         """
         if not key:
             return
-        key = self._db_field_map.get(key, key)
-        if (hasattr(self, '_changed_fields') and
-           key not in self._changed_fields):
+
+        if not hasattr(self, '_changed_fields'):
+            return
+
+        if '.' in key:
+            key, rest = key.split('.', 1)
+            key = self._db_field_map.get(key, key)
+            key = '%s.%s' % (key, rest)
+        else:
+            key = self._db_field_map.get(key, key)
+
+        if key not in self._changed_fields:
             self._changed_fields.append(key)
 
     def _clear_changed_fields(self):
@@ -392,6 +497,8 @@ class BaseDocument(object):
                 else:
                     data = getattr(data, part, None)
                 if hasattr(data, "_changed_fields"):
+                    if hasattr(data, "_is_document") and data._is_document:
+                        continue
                     data._changed_fields = []
         self._changed_fields = []
 
@@ -405,12 +512,17 @@ class BaseDocument(object):
 
         for index, value in iterator:
             list_key = "%s%s." % (key, index)
+            # don't check anything lower if this key is already marked
+            # as changed.
+            if list_key[:-1] in changed_fields:
+                continue
             if hasattr(value, '_get_changed_fields'):
                 changed = value._get_changed_fields(inspected)
                 changed_fields += ["%s%s" % (list_key, k)
-                                    for k in changed if k]
+                                   for k in changed if k]
             elif isinstance(value, (list, tuple, dict)):
-                self._nestable_types_changed_fields(changed_fields, list_key, value, inspected)
+                self._nestable_types_changed_fields(
+                    changed_fields, list_key, value, inspected)
 
     def _get_changed_fields(self, inspected=None):
         """Returns a list of all fields that have explicitly been changed.
@@ -420,6 +532,7 @@ class BaseDocument(object):
         ReferenceField = _import_class("ReferenceField")
         changed_fields = []
         changed_fields += getattr(self, '_changed_fields', [])
+
         inspected = inspected or set()
         if hasattr(self, 'id') and isinstance(self.id, Hashable):
             if self.id in inspected:
@@ -439,16 +552,17 @@ class BaseDocument(object):
             if isinstance(field, ReferenceField):
                 continue
             elif (isinstance(data, (EmbeddedDocument, DynamicEmbeddedDocument))
-               and db_field_name not in changed_fields):
+                  and db_field_name not in changed_fields):
                  # Find all embedded fields that have been changed
                 changed = data._get_changed_fields(inspected)
                 changed_fields += ["%s%s" % (key, k) for k in changed if k]
             elif (isinstance(data, (list, tuple, dict)) and
                     db_field_name not in changed_fields):
                 if (hasattr(field, 'field') and
-                    isinstance(field.field, ReferenceField)):
+                        isinstance(field.field, ReferenceField)):
                     continue
-                self._nestable_types_changed_fields(changed_fields, key, data, inspected)
+                self._nestable_types_changed_fields(
+                    changed_fields, key, data, inspected)
         return changed_fields
 
     def _delta(self):
@@ -472,7 +586,10 @@ class BaseDocument(object):
                     if isinstance(d, (ObjectId, DBRef)):
                         break
                     elif isinstance(d, list) and p.isdigit():
-                        d = d[int(p)]
+                        try:
+                            d = d[int(p)]
+                        except IndexError:
+                            d = None
                     elif hasattr(d, 'get'):
                         d = d.get(p)
                     new_path.append(p)
@@ -491,7 +608,7 @@ class BaseDocument(object):
             # If we've set a value that ain't the default value dont unset it.
             default = None
             if (self._dynamic and len(parts) and parts[0] in
-               self._dynamic_fields):
+                    self._dynamic_fields):
                 del(set_data[path])
                 unset_data[path] = 1
                 continue
@@ -537,18 +654,16 @@ class BaseDocument(object):
         return cls._meta.get('collection', None)
 
     @classmethod
-    def _from_son(cls, son, _auto_dereference=True):
+    def _from_son(cls, son, _auto_dereference=True, only_fields=None, created=False):
         """Create an instance of a Document (subclass) from a PyMongo SON.
         """
+        if not only_fields:
+            only_fields = []
 
         # get the class name from the document, falling back to the given
         # class if unavailable
         class_name = son.get('_cls', cls._class_name)
         data = dict(("%s" % key, value) for key, value in son.iteritems())
-        if not UNICODE_KWARGS:
-            # python 2.6.4 and lower cannot handle unicode keys
-            # passed to class constructor example: cls(**data)
-            to_str_keys_recursive(data)
 
         # Return correct subclass for document type
         if class_name != cls._class_name:
@@ -578,19 +693,24 @@ class BaseDocument(object):
                     default = default()
                 if isinstance(default, BaseDocument):
                     changed_fields.append(field_name)
+                elif not only_fields or field_name in only_fields:
+                    changed_fields.append(field_name)
 
         if errors_dict:
             errors = "\n".join(["%s - %s" % (k, v)
-                     for k, v in errors_dict.items()])
+                                for k, v in errors_dict.items()])
             msg = ("Invalid data to create a `%s` instance.\n%s"
                    % (cls._class_name, errors))
             raise InvalidDocumentError(msg)
 
-        obj = cls(__auto_convert=False, **data)
+        if cls.STRICT:
+            data = dict((k, v)
+                        for k, v in data.iteritems() if k in cls._fields)
+        obj = cls(__auto_convert=False, _created=created, __only_fields=only_fields, **data)
         obj._changed_fields = changed_fields
-        obj._created = False
         if not _auto_dereference:
             obj._fields = fields
+
         return obj
 
     @classmethod
@@ -609,7 +729,7 @@ class BaseDocument(object):
 
             spec_fields = [v['fields']
                            for k, v in enumerate(index_specs)]
-            # Merge unqiue_indexes with existing specs
+            # Merge unique_indexes with existing specs
             for k, v in enumerate(indices):
                 if v['fields'] in spec_fields:
                     index_specs[spec_fields.index(v['fields'])].update(v)
@@ -640,6 +760,9 @@ class BaseDocument(object):
                                           ALLOW_INHERITANCE)
         include_cls = (allow_inheritance and not spec.get('sparse', False) and
                        spec.get('cls',  True))
+
+        # 733: don't include cls if index_cls is False unless there is an explicit cls with the index
+        include_cls = include_cls and (spec.get('cls', False) or cls._meta.get('index_cls', True))
         if "cls" in spec:
             spec.pop('cls')
         for key in spec['fields']:
@@ -647,15 +770,18 @@ class BaseDocument(object):
             if isinstance(key, (list, tuple)):
                 continue
 
-            # ASCENDING from +,
+            # ASCENDING from +
             # DESCENDING from -
             # GEO2D from *
+            # TEXT from $
             direction = pymongo.ASCENDING
             if key.startswith("-"):
                 direction = pymongo.DESCENDING
             elif key.startswith("*"):
                 direction = pymongo.GEO2D
-            if key.startswith(("+", "-", "*")):
+            elif key.startswith("$"):
+                direction = pymongo.TEXT
+            if key.startswith(("+", "-", "*", "$")):
                 key = key[1:]
 
             # Use real field name, do it manually because we need field
@@ -666,8 +792,14 @@ class BaseDocument(object):
                 fields = []
             else:
                 fields = cls._lookup_field(parts)
-                parts = [field if field == '_id' else field.db_field
-                         for field in fields]
+                parts = []
+                for field in fields:
+                    try:
+                        if field != "_id":
+                            field = field.db_field
+                    except AttributeError:
+                        pass
+                    parts.append(field)
                 key = '.'.join(parts)
             index_list.append((key, direction))
 
@@ -691,10 +823,9 @@ class BaseDocument(object):
         """
         unique_indexes = []
         for field_name, field in cls._fields.items():
-            sparse = False
+            sparse = field.sparse
             # Generate a list of indexes needed by uniqueness constraints
             if field.unique:
-                field.required = True
                 unique_fields = [field.db_field]
 
                 # Add any unique_with fields to the back of the index spec
@@ -722,9 +853,12 @@ class BaseDocument(object):
                 index = {'fields': fields, 'unique': True, 'sparse': sparse}
                 unique_indexes.append(index)
 
+            if field.__class__.__name__ == "ListField":
+                field = field.field
+
             # Grab any embedded document field unique indexes
             if (field.__class__.__name__ == "EmbeddedDocumentField" and
-               field.document_type != cls):
+                    field.document_type != cls):
                 field_namespace = "%s." % field_name
                 doc_cls = field.document_type
                 unique_indexes += doc_cls._unique_with_indexes(field_namespace)
@@ -740,7 +874,8 @@ class BaseDocument(object):
         geo_field_type_names = ["EmbeddedDocumentField", "GeoPointField",
                                 "PointField", "LineStringField", "PolygonField"]
 
-        geo_field_types = tuple([_import_class(field) for field in geo_field_type_names])
+        geo_field_types = tuple([_import_class(field)
+                                 for field in geo_field_type_names])
 
         for field in cls._fields.values():
             if not isinstance(field, geo_field_types):
@@ -750,13 +885,14 @@ class BaseDocument(object):
                 if field_cls in inspected:
                     continue
                 if hasattr(field_cls, '_geo_indices'):
-                    geo_indices += field_cls._geo_indices(inspected, parent_field=field.db_field)
+                    geo_indices += field_cls._geo_indices(
+                        inspected, parent_field=field.db_field)
             elif field._geo_index:
                 field_name = field.db_field
                 if parent_field:
                     field_name = "%s.%s" % (parent_field, field_name)
                 geo_indices.append({'fields':
-                                   [(field_name, field._geo_index)]})
+                                    [(field_name, field._geo_index)]})
         return geo_indices
 
     @classmethod
@@ -789,6 +925,19 @@ class BaseDocument(object):
                 elif cls._dynamic:
                     DynamicField = _import_class('DynamicField')
                     field = DynamicField(db_field=field_name)
+                elif cls._meta.get("allow_inheritance", False) or cls._meta.get("abstract", False):
+                    # 744: in case the field is defined in a subclass
+                    field = None
+                    for subcls in cls.__subclasses__():
+                        try:
+                            field = subcls._lookup_field([field_name])[0]
+                        except LookUpError:
+                            continue
+
+                        if field is not None:
+                            break
+                    else:
+                        raise LookUpError('Cannot resolve field "%s"' % field_name)
                 else:
                     raise LookUpError('Cannot resolve field "%s"'
                                       % field_name)
@@ -804,8 +953,17 @@ class BaseDocument(object):
                    # Look up subfield on the previous field
                     new_field = field.lookup_member(field_name)
                 if not new_field and isinstance(field, ComplexBaseField):
-                    fields.append(field_name)
-                    continue
+                    if hasattr(field.field, 'document_type') and cls._dynamic \
+                            and field.field.document_type._dynamic:
+                        DynamicField = _import_class('DynamicField')
+                        new_field = DynamicField(db_field=field_name)
+                    else:
+                        fields.append(field_name)
+                        continue
+                elif not new_field and hasattr(field, 'document_type') and cls._dynamic \
+                        and field.document_type._dynamic:
+                    DynamicField = _import_class('DynamicField')
+                    new_field = DynamicField(db_field=field_name)
                 elif not new_field:
                     raise LookUpError('Cannot resolve field "%s"'
                                       % field_name)
@@ -825,7 +983,11 @@ class BaseDocument(object):
         """Dynamically set the display value for a field with choices"""
         for attr_name, field in self._fields.items():
             if field.choices:
-                setattr(self,
+                if self._dynamic:
+                    obj = self
+                else:
+                    obj = type(self)
+                setattr(obj,
                         'get_%s_display' % attr_name,
                         partial(self.__get_field_display, field=field))
 

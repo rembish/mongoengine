@@ -94,7 +94,7 @@ class QuerySet(BaseQuerySet):
             except StopIteration:
                 self._has_more = False
 
-    def count(self, with_limit_and_skip=True):
+    def count(self, with_limit_and_skip=False):
         """Count the selected elements in the query.
 
         :param with_limit_and_skip (optional): take any :meth:`limit` or
@@ -155,3 +155,10 @@ class QuerySetNoCache(BaseQuerySet):
             queryset = self.clone()
         queryset.rewind()
         return queryset
+
+
+class QuerySetNoDeRef(QuerySet):
+    """Special no_dereference QuerySet"""
+
+    def __dereference(items, max_depth=1, instance=None, name=None):
+        return items

@@ -1,6 +1,9 @@
 from bson import DBRef, SON
 
-from base import (BaseDict, BaseList, TopLevelDocumentMetaclass, get_document)
+from base import (
+    BaseDict, BaseList, EmbeddedDocumentList,
+    TopLevelDocumentMetaclass, get_document
+)
 from fields import (ReferenceField, ListField, DictField, MapField)
 from connection import get_db
 from queryset import QuerySet
@@ -12,7 +15,7 @@ class DeReference(object):
     def __call__(self, items, max_depth=1, instance=None, name=None):
         """
         Cheaply dereferences the items to a set depth.
-        Also handles the convertion of complex data types.
+        Also handles the conversion of complex data types.
 
         :param items: The iterable (dict, list, queryset) to be dereferenced.
         :param max_depth: The maximum depth to recurse to
@@ -36,7 +39,7 @@ class DeReference(object):
         if instance and isinstance(instance, (Document, EmbeddedDocument,
                                               TopLevelDocumentMetaclass)):
             doc_type = instance._fields.get(name)
-            if hasattr(doc_type, 'field'):
+            while hasattr(doc_type, 'field'):
                 doc_type = doc_type.field
 
             if isinstance(doc_type, ReferenceField):
@@ -51,9 +54,19 @@ class DeReference(object):
                     return items
                 elif not field.dbref:
                     if not hasattr(items, 'items'):
-                        items = [field.to_python(v)
-                             if not isinstance(v, (DBRef, Document)) else v
-                             for v in items]
+
+                        def _get_items(items):
+                            new_items = []
+                            for v in items:
+                                if isinstance(v, list):
+                                    new_items.append(_get_items(v))
+                                elif not isinstance(v, (DBRef, Document)):
+                                    new_items.append(field.to_python(v))
+                                else:
+                                    new_items.append(v)
+                            return new_items
+
+                        items = _get_items(items)
                     else:
                         items = dict([
                             (k, field.to_python(v))
@@ -85,7 +98,7 @@ class DeReference(object):
         # Recursively find dbreferences
         depth += 1
         for k, item in iterator:
-            if isinstance(item, Document):
+            if isinstance(item, (Document, EmbeddedDocument)):
                 for field_name, field in item._fields.iteritems():
                     v = item._data.get(field_name, None)
                     if isinstance(v, (DBRef)):
@@ -114,11 +127,11 @@ class DeReference(object):
         """Fetch all references and convert to their document objects
         """
         object_map = {}
-        for col, dbrefs in self.reference_map.iteritems():
+        for collection, dbrefs in self.reference_map.iteritems():
             keys = object_map.keys()
             refs = list(set([dbref for dbref in dbrefs if unicode(dbref).encode('utf-8') not in keys]))
-            if hasattr(col, 'objects'):  # We have a document class for the refs
-                references = col.objects.in_bulk(refs)
+            if hasattr(collection, 'objects'):  # We have a document class for the refs
+                references = collection.objects.in_bulk(refs)
                 for key, doc in references.iteritems():
                     object_map[key] = doc
             else:  # Generic reference: use the refs data to convert to document
@@ -126,19 +139,19 @@ class DeReference(object):
                     continue
 
                 if doc_type:
-                    references = doc_type._get_db()[col].find({'_id': {'$in': refs}})
+                    references = doc_type._get_db()[collection].find({'_id': {'$in': refs}})
                     for ref in references:
                         doc = doc_type._from_son(ref)
                         object_map[doc.id] = doc
                 else:
-                    references = get_db()[col].find({'_id': {'$in': refs}})
+                    references = get_db()[collection].find({'_id': {'$in': refs}})
                     for ref in references:
                         if '_cls' in ref:
                             doc = get_document(ref["_cls"])._from_son(ref)
                         elif doc_type is None:
                             doc = get_document(
                                 ''.join(x.capitalize()
-                                    for x in col.split('_')))._from_son(ref)
+                                    for x in collection.split('_')))._from_son(ref)
                         else:
                             doc = doc_type._from_son(ref)
                         object_map[doc.id] = doc
@@ -170,11 +183,18 @@ class DeReference(object):
                 return self.object_map.get(items['_ref'].id, items)
             elif '_cls' in items:
                 doc = get_document(items['_cls'])._from_son(items)
+                _cls = doc._data.pop('_cls', None)
+                del items['_cls']
                 doc._data = self._attach_objects(doc._data, depth, doc, None)
+                if _cls is not None:
+                    doc._data['_cls'] = _cls
                 return doc
 
         if not hasattr(items, 'items'):
             is_list = True
+            list_type = BaseList
+            if isinstance(items, EmbeddedDocumentList):
+                list_type = EmbeddedDocumentList
             as_tuple = isinstance(items, tuple)
             iterator = enumerate(items)
             data = []
@@ -192,7 +212,7 @@ class DeReference(object):
 
             if k in self.object_map and not is_list:
                 data[k] = self.object_map[k]
-            elif isinstance(v, Document):
+            elif isinstance(v, (Document, EmbeddedDocument)):
                 for field_name, field in v._fields.iteritems():
                     v = data[k]._data.get(field_name, None)
                     if isinstance(v, (DBRef)):
@@ -204,13 +224,14 @@ class DeReference(object):
                     elif isinstance(v, (list, tuple)) and depth <= self.max_depth:
                         data[k]._data[field_name] = self._attach_objects(v, depth, instance=instance, name=name)
             elif isinstance(v, (dict, list, tuple)) and depth <= self.max_depth:
-                data[k] = self._attach_objects(v, depth - 1, instance=instance, name=name)
+                item_name = '%s.%s' % (name, k) if name else name
+                data[k] = self._attach_objects(v, depth - 1, instance=instance, name=item_name)
             elif hasattr(v, 'id'):
                 data[k] = self.object_map.get(v.id, v)
 
         if instance and name:
             if is_list:
-                return tuple(data) if as_tuple else BaseList(data, instance, name)
+                return tuple(data) if as_tuple else list_type(data, instance, name)
             return BaseDict(data, instance, name)
         depth += 1
         return data

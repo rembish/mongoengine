@@ -291,19 +291,43 @@ class FieldTest(unittest.TestCase):
                 self.assertEqual(employee.friends, friends)
                 self.assertEqual(q, 2)
 
+    def test_list_of_lists_of_references(self):
+
+        class User(Document):
+            name = StringField()
+
+        class Post(Document):
+            user_lists = ListField(ListField(ReferenceField(User)))
+
+        class SimpleList(Document):
+            users = ListField(ReferenceField(User))
+
+        User.drop_collection()
+        Post.drop_collection()
+
+        u1 = User.objects.create(name='u1')
+        u2 = User.objects.create(name='u2')
+        u3 = User.objects.create(name='u3')
+
+        SimpleList.objects.create(users=[u1, u2, u3])
+        self.assertEqual(SimpleList.objects.all()[0].users, [u1, u2, u3])
+
+        Post.objects.create(user_lists=[[u1, u2], [u3]])
+        self.assertEqual(Post.objects.all()[0].user_lists, [[u1, u2], [u3]])
+
     def test_circular_reference(self):
         """Ensure you can handle circular references
         """
+        class Relation(EmbeddedDocument):
+            name = StringField()
+            person = ReferenceField('Person')
+
         class Person(Document):
             name = StringField()
             relations = ListField(EmbeddedDocumentField('Relation'))
 
             def __repr__(self):
                 return "<Person: %s>" % self.name
-
-        class Relation(EmbeddedDocument):
-            name = StringField()
-            person = ReferenceField('Person')
 
         Person.drop_collection()
         mother = Person(name="Mother")
@@ -923,6 +947,8 @@ class FieldTest(unittest.TestCase):
 
         class Asset(Document):
             name = StringField(max_length=250, required=True)
+            path = StringField()
+            title = StringField()
             parent = GenericReferenceField(default=None)
             parents = ListField(GenericReferenceField())
             children = ListField(GenericReferenceField())
@@ -1195,6 +1221,31 @@ class FieldTest(unittest.TestCase):
         page = Page.objects.first()
         self.assertEqual(page.tags[0], page.posts[0].tags[0])
 
+    def test_select_related_follows_embedded_referencefields(self):
+
+        class Song(Document):
+            title = StringField()
+
+        class PlaylistItem(EmbeddedDocument):
+            song = ReferenceField("Song")
+
+        class Playlist(Document):
+            items = ListField(EmbeddedDocumentField("PlaylistItem"))
+
+        Playlist.drop_collection()
+        Song.drop_collection()
+
+        songs = [Song.objects.create(title="song %d" % i) for i in range(3)]
+        items = [PlaylistItem(song=song) for song in songs]
+        playlist = Playlist.objects.create(items=items)
+
+        with query_counter() as q:
+            self.assertEqual(q, 0)
+
+            playlist = Playlist.objects.first().select_related()
+            songs = [item.song for item in playlist.items]
+
+            self.assertEqual(q, 2)
+
 if __name__ == '__main__':
     unittest.main()
-

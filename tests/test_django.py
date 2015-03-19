@@ -2,11 +2,11 @@ import sys
 sys.path[0:0] = [""]
 import unittest
 from nose.plugins.skip import SkipTest
+
 from mongoengine import *
-
-
 from mongoengine.django.shortcuts import get_document_or_404
 
+import django
 from django.http import Http404
 from django.template import Context, Template
 from django.conf import settings
@@ -20,6 +20,13 @@ settings.configure(
 )
 
 try:
+    # For Django >= 1.7
+    if hasattr(django, 'setup'):
+        django.setup()
+except RuntimeError:
+    pass
+
+try:
     from django.contrib.auth import authenticate, get_user_model
     from mongoengine.django.auth import User
     from mongoengine.django.mongo_auth.models import (
@@ -30,8 +37,8 @@ try:
     DJ15 = True
 except Exception:
     DJ15 = False
-from django.contrib.sessions.tests import SessionTestsMixin
 from mongoengine.django.sessions import SessionStore, MongoSession
+from mongoengine.django.tests import MongoTestCase
 from datetime import tzinfo, timedelta
 ZERO = timedelta(0)
 
@@ -165,8 +172,13 @@ class QuerySetTest(unittest.TestCase):
         """Ensure that a queryset and filters work as expected
         """
 
+        class LimitCountQuerySet(QuerySet):
+            def count(self, with_limit_and_skip=True):
+                return super(LimitCountQuerySet, self).count(with_limit_and_skip)
+
         class Note(Document):
-            text = StringField()
+            meta = dict(queryset_class=LimitCountQuerySet)
+            name = StringField()
 
         Note.drop_collection()
 
@@ -216,13 +228,13 @@ class QuerySetTest(unittest.TestCase):
         self.assertEqual(t.render(c), "10")
 
 
-class MongoDBSessionTest(SessionTestsMixin, unittest.TestCase):
+class _BaseMongoDBSessionTest(unittest.TestCase):
     backend = SessionStore
 
     def setUp(self):
         connect(db='mongoenginetest')
         MongoSession.drop_collection()
-        super(MongoDBSessionTest, self).setUp()
+        super(_BaseMongoDBSessionTest, self).setUp()
 
     def assertIn(self, first, second, msg=None):
         self.assertTrue(first in second, msg)
@@ -247,6 +259,21 @@ class MongoDBSessionTest(SessionTestsMixin, unittest.TestCase):
         key = session.session_key
         session = SessionStore(key)
         self.assertTrue('test_expire' in session, 'Session has expired before it is expected')
+
+
+try:
+    # SessionTestsMixin isn't available for import on django > 1.8a1
+    from django.contrib.sessions.tests import SessionTestsMixin
+
+    class _MongoDBSessionTest(SessionTestsMixin):
+        pass
+
+    class MongoDBSessionTest(_BaseMongoDBSessionTest):
+        pass
+
+except ImportError:
+    class MongoDBSessionTest(_BaseMongoDBSessionTest):
+        pass
 
 
 class MongoAuthTest(unittest.TestCase):
@@ -292,6 +319,12 @@ class MongoAuthTest(unittest.TestCase):
         user = authenticate(username='user', password='test')
         db_user = User.objects.get(username='user')
         self.assertEqual(user.id, db_user.id)
+
+
+class MongoTestCaseTest(MongoTestCase):
+    def test_mongo_test_case(self):
+        self.db.dummy_collection.insert({'collection': 'will be dropped'})
+
 
 if __name__ == '__main__':
     unittest.main()
